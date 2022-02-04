@@ -1,0 +1,531 @@
+---
+title: "NBA 4920/6921 Final Project"
+author: "Chunhao Yang (cy365), Caiwei Zhang (cz272), Stella Gu (xg326), Jack Callard (jsc346)"
+date: "Due 11/30/2021"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      comment = '', 
+                      warning = FALSE, 
+                      message = FALSE)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+options(digits = 3, scipen = 999)
+library(tidyverse)
+library(cowplot)
+library(ggcorrplot)
+library(stargazer)
+library(corrr)
+library(glmnet)
+library(lmtest)
+library(sandwich)
+library(car)
+library(jtools)
+library(caret)
+library(leaps)
+library(future.apply)
+library(dplyr)
+library(gbm)
+library(xgboost)
+library(ranger)
+library(rpart)
+library(rpart.plot)
+set.seed(1)
+```
+
+# Data
+
+```{r message=FALSE, warning=FALSE}
+
+#pre-process the data
+houses = read.csv("houses.csv")[,-c(1,10)]
+str(houses)
+hist(houses$SalePrice)
+
+library(mice)
+library(VIM)
+sum(is.na(houses))#there are 6965 missing values that cannot be ignored
+md.pattern(houses, )
+aggr(houses, prop=TRUE, sortVars=TRUE, numbers=TRUE, cex.axis=.3, gap=1)#we can see from the patterns that some variables have a big proportion of missing values
+houses = houses[,-which(colnames(houses)%in%c("PoolQC","MiscFeature","Alley","Fence"))]
+summary(houses$FireplaceQu) #in this case, "NA" has the meaning of no fireplace
+houses$FireplaceQu[is.na(houses$FireplaceQu)] <- "No"
+houses$GarageType[is.na(houses$GarageType)] <- "No"
+houses$GarageFinish[is.na(houses$GarageFinish)] <- "No"
+houses$GarageQual[is.na(houses$GarageQual)] <- "No"
+houses$GarageCond[is.na(houses$GarageCond)] <- "No"
+houses$GarageCars[is.na(houses$GarageCars)] <- 0
+houses$GarageArea[is.na(houses$GarageArea)] <- 0
+houses = houses[,-which(colnames(houses)%in%c("GarageYrBlt"))]
+
+houses$BsmtQual[is.na(houses$BsmtQual)] <- "No"
+houses$BsmtCond[is.na(houses$BsmtCond)] <- "No"
+houses$BsmtExposure[is.na(houses$BsmtExposure)] <- "No"
+houses$BsmtFinType1[is.na(houses$BsmtFinType1)] <- "No"
+houses$BsmtFinTypeTwo[is.na(houses$BsmtFinTypeTwo)] <- "No"
+
+houses = houses[,-which(colnames(houses)%in%c("MasVnrArea", "MasVnrType"))]
+aggr(houses, prop=FALSE, sortVars=TRUE, numbers=TRUE, cex.axis=.3, gap=1)#now, there are only variables that have missing values
+#because there are only 1 missing value in Electrical, we use the mode as imputation. 
+table(houses$Electrical)
+houses$Electrical[is.na(houses$Electrical)] <- "SBrkr"
+
+#use Multiple Imputation to fix the missing values in LotFrontage.
+imp<-mice(houses,m=5)
+fit<-with(imp,lm(SalePrice~LotFrontage))
+pooled<-pool(fit)
+houses<-complete(imp,action = 3)
+  
+#turn characters into factors
+houses <- mutate_if(houses, is.character, as.factor)
+
+#set training and testing data
+train_sample = sample(1:nrow(houses), 0.7*nrow(houses))
+data_train = houses[train_sample,]
+data_test = houses[-train_sample,]
+
+houses%>%
+  for i in ncol(houses){
+  if (is.numeric(houses[,i])==TRUE, 
+      scale(houses[,i])
+}
+ 
+RMSE <- matrix(NA,ncol = 2, nrow = 10)
+rownames(RMSE) <- c("rmse.tree.nocp", "rmse.tree.1se",
+                    "rmse.lasso.best","rmse.lasso.1se",
+                    "rmse.ridge.best","rmse.ridge.1se",
+                    "rmse.elnet.best","rmse.elnet.1se",
+                    "rmse.forest", "rmse.boost")
+colnames(RMSE) <- c("CV","TEST")
+```
+
+***
+
+# REGRESSION TREES
+
+## Tune & Train the model
+
+- In order to obtain a fully grown tree, we set `cp = 0` to have no penalty results
+
+```{r}
+house_tree = rpart(SalePrice ~ .,data = data_train,
+          method="anova",control = list(cp=0,xval=10))
+
+plotcp(house_tree)
+abline(v = 8, lty = "dashed")
+```
+
+- The tree within one standard deviation has 8 terminal nodes.
+- We could obtain a tree with 8 terminal nodes by setting `maxdepth=3`.
+
+```{r}
+
+house_tree1se <- rpart(SalePrice ~ .,data = data_train, method="anova",maxdepth=3)
+
+rpart.plot(house_tree1se)
+plotcp(house_tree1se)
+```
+
+## Cross Validation Error Estimate
+
+```{r}
+nfold = 10
+
+fold.list <- createFolds(rownames(data_train),nfold)
+
+tree.RMSE <- numeric(nfold)
+
+for(each in 1:nfold){
+  train <- data_train[-fold.list[[each]],]
+  validate <- data_train[fold.list[[each]],]
+  est_model = rpart(SalePrice ~ .,data = train,
+          method="anova",control = list(cp=0,xval=10))
+
+  y_hat = predict(est_model, validate)
+  tree.RMSE[each] <-sqrt(mean((validate$SalePrice - y_hat)^2)) 
+}
+rmse.cv.tree.nocp = mean(tree.RMSE)
+```
+
+```{r}
+nfold = 10
+
+fold.list <- createFolds(rownames(data_train),nfold)
+
+tree.RMSE <- numeric(nfold)
+
+for(each in 1:nfold){
+  train <- data_train[-fold.list[[each]],]
+  validate <- data_train[fold.list[[each]],]
+  est_model = rpart(SalePrice ~ .,data = train, method="anova",maxdepth=3)
+
+  y_hat = predict(est_model, validate)
+  tree.RMSE[each] <-sqrt(mean((validate$SalePrice - y_hat)^2)) 
+}
+rmse.cv.tree.1se = mean(tree.RMSE)
+```
+
+## Predictions
+
+```{r}
+pred.tree.nocp <- predict(house_tree, data_test)
+rmse.test.tree.nocp <- sqrt(mean((data_test$SalePrice-pred.tree.nocp)^2))
+
+pred.tree1se <- predict(house_tree1se, data_test)
+rmse.test.tree.1se <- sqrt(mean((data_test$SalePrice-pred.tree1se)^2))
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[1,] <- c(rmse.cv.tree.nocp, rmse.test.tree.nocp)
+RMSE[2,] <- c(rmse.cv.tree.1se, rmse.test.tree.1se)
+RMSE
+```
+
+***
+
+# LASSO REGRESSION
+
+## Initialize Grid & Data
+
+```{r}
+grid=10^seq(10,-2,length=100)
+
+x = model.matrix(SalePrice~.,data_train)
+xtest = model.matrix(SalePrice~.,data_test)
+y = data_train[,ncol(data_train)]
+ytest = data_test[,ncol(data_test)]
+```
+
+## Visualize
+
+```{r}
+lasso.mod = glmnet(x,y,alpha=1,lambda=grid)
+plot(lasso.mod, xvar = "lambda")
+```
+
+## Train Model
+
+```{r}
+lasso.cv=cv.glmnet(x,y,alpha=1,nfold=10,type.measure="mse")
+plot(lasso.cv)
+```
+
+## Cross Validation Error Estimate
+
+```{r }
+rmse.cv.lasso.best = sqrt(lasso.cv$cvm[lasso.cv$lambda.min == lasso.cv$lambda])
+rmse.cv.lasso.1se = sqrt(lasso.cv$cvm[lasso.cv$lambda.1se == lasso.cv$lambda])
+```
+
+## Predictions
+
+```{r }
+pred.lasso.best = predict(lasso.cv,s=lasso.cv$lambda.min,newx=xtest)
+pred.lasso.1se = predict(lasso.cv,s=lasso.cv$lambda.1se,newx=xtest)
+
+rmse.test.lasso.best <- sqrt(mean((pred.lasso.best- ytest)^2))
+rmse.test.lasso.1se <- sqrt(mean((pred.lasso.1se- ytest)^2))
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[3,] <- c(rmse.cv.lasso.best, rmse.test.lasso.best)
+RMSE[4,] <- c(rmse.cv.lasso.1se, rmse.test.lasso.1se)
+RMSE
+```
+
+***
+
+# RIDGE REGRESSION
+
+## Visualize
+
+```{r}
+ridge.cv=cv.glmnet(x,y,alpha=0,nfold=10, type.measure="mse")
+plot(ridge.cv)
+```
+
+
+## Cross Validation Error Estimate
+
+```{r }
+rmse.cv.ridge.best = sqrt(ridge.cv$cvm[ridge.cv$lambda.min == ridge.cv$lambda])
+rmse.cv.ridge.1se = sqrt(ridge.cv$cvm[ridge.cv$lambda.1se == ridge.cv$lambda])
+```
+
+## Predictions
+
+```{r }
+pred.ridge.best = predict(ridge.cv,s=ridge.cv$lambda.min,newx=xtest)
+pred.ridge.1se = predict(ridge.cv,s=ridge.cv$lambda.1se,newx=xtest)
+
+rmse.test.ridge.best <- sqrt(mean((pred.ridge.best- ytest)^2))
+rmse.test.ridge.1se <- sqrt(mean((pred.ridge.1se- ytest)^2))
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[5,] <- c(rmse.cv.ridge.best, rmse.test.ridge.best)
+RMSE[6,] <- c(rmse.cv.ridge.1se, rmse.test.ridge.1se)
+RMSE
+```
+
+***
+
+# ELASTIC NET
+
+## Initialize Tuning Grid
+
+```{r}
+fold_id <- sample(1:10, size = length(y), replace=TRUE)
+tuning_grid <- data.frame(alpha = seq(0, 1, by = .1), mse_min = NA, mse_1se = NA, lambda_min = NA, lambda_1se = NA)
+```
+
+## Tune Model
+
+```{r}
+for(i in seq_along(tuning_grid$alpha) ) {
+# fit CV model for each alpha value
+fit <- cv.glmnet(x,y, alpha = tuning_grid$alpha[i], foldid = fold_id, type.measure="mse")
+# extract MSE and lambda values
+tuning_grid$mse_min[i] <- fit$cvm[fit$lambda==
+fit$lambda.min]
+tuning_grid$mse_1se[i] <- fit$cvm[fit$lambda==
+fit$lambda.1se]
+tuning_grid$lambda_min[i] <- fit$lambda.min
+tuning_grid$lambda_1se[i] <- fit$lambda.1se
+}
+tuning_grid %>% arrange(mse_min)
+```
+## Extract Best Value
+
+```{r}
+best.index <- which.min(tuning_grid$mse_min)
+best.alpha <- tuning_grid[best.index ,"alpha"]
+best.lambda <- tuning_grid[best.index ,"lambda_min"]
+best.lambda.1se <- tuning_grid[best.index ,"lambda_1se"]
+best.alpha
+best.lambda
+best.lambda.1se
+rmse.cv.elnet.lambdabest = sqrt(tuning_grid[best.index ,"mse_min"])
+rmse.cv.elnet.lambda1se = sqrt(tuning_grid[best.index ,"mse_1se"])
+```
+## Predictions
+
+```{r}
+elnet.mod <- glmnet(x,y,alpha=best.alpha,type.measure="mse")
+elnet.pred.lambdabest <- predict(elnet.mod, s=best.lambda, newx=xtest, exact=TRUE,x=x,y=y)
+elnet.pred.lambda1se <- predict(elnet.mod, s=best.lambda.1se,newx=xtest, exact=TRUE,x=x,y=y)
+rmse.elnet.lambdabest<-sqrt(mean((ytest - elnet.pred.lambdabest)^2))
+rmse.elnet.lambda1se<-sqrt(mean((ytest - elnet.pred.lambda1se)^2))
+
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[7,] <- c(rmse.cv.elnet.lambdabest, rmse.elnet.lambdabest)
+RMSE[8,] <- c(rmse.cv.elnet.lambda1se, rmse.elnet.lambda1se)
+RMSE
+
+```
+***
+
+# RANDOM FOREST
+
+## Initialize Hyper Grid
+
+```{r}
+hyper_grid <- expand.grid(
+  mtry       = seq(5, 15, by = 1),
+  node_size  = seq(2, 8, by = 2),
+  sample_size = c(.6, .7, .8, .9),
+  OOB_RMSE   = 0
+)
+```
+
+## Tune Model
+
+```{r}
+for(i in 1:nrow(hyper_grid)) {
+
+  model <- ranger(
+    formula         = SalePrice ~ ., 
+    data            = data_train, 
+    num.trees       = 300,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$node_size[i],
+    sample.fraction = hyper_grid$sample_size[i]  )
+
+  hyper_grid$OOB_RMSE[i] <- sqrt(model$prediction.error)
+}
+
+best.model <- hyper_grid %>% 
+  arrange(OOB_RMSE) %>%
+  head(10)
+best.model
+```
+
+## Train Model
+
+```{r}
+rf.final <- ranger(
+    formula         = SalePrice ~ ., 
+    data            = data_train, 
+    num.trees       = 300,
+    mtry            = best.model$mtry[1],
+    min.node.size   = best.model$node_size[1],
+    sample.fraction = best.model$sample_size[1],
+    importance      = 'impurity')
+```
+
+## Cross Validation Error Estimate
+
+```{r}
+nfold = 10
+
+fold.list <- createFolds(rownames(data_train),nfold)
+
+forest.RMSE <- numeric(nfold)
+
+for(each in 1:nfold){
+  train <- data_train[-fold.list[[each]],]
+  validate <- data_train[fold.list[[each]],]
+  
+  est_model = ranger(
+    formula         = SalePrice ~ ., 
+    data            = train, 
+    num.trees       = 300,
+    mtry            = best.model$mtry[1],
+    min.node.size   = best.model$node_size[1],
+    sample.fraction = best.model$sample_size[1],
+    importance      = 'impurity')
+
+  y_hat = predict(est_model, validate)$predictions
+  forest.RMSE[each] <-sqrt(mean((validate$SalePrice - y_hat)^2)) 
+}
+rmse.cv.forest = mean(forest.RMSE)
+```
+
+## Predictions
+
+```{r}
+pred.rf.final <- predict(rf.final, data_test)$predictions
+rmse.test.forest <- sqrt(mean((data_test$SalePrice - pred.rf.final)^2))
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[9,] <- c(rmse.cv.forest, rmse.test.forest)
+RMSE
+```
+
+## Importance
+```{r}
+library(vip)
+vip(rf.final)
+```
+
+
+***
+
+# BOOSTING
+
+## Initialize Hyper Grid
+
+```{r}
+hyper_grid <- expand.grid(
+  shrinkage = c(.01, .1),
+  interaction.depth = c(1, 3),
+  n.minobsinnode = c(5, 10),
+  bag.fraction = c(.7, .8), 
+  optimal_trees = 0,               
+  min_RMSE = 0                     
+)
+```
+
+## Tune Model
+
+```{r}
+for(i in 1:nrow(hyper_grid)) {
+  gbm.tune <- gbm(
+    formula = SalePrice ~ .,
+    distribution = "gaussian",
+    data = data_train,
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    bag.fraction = hyper_grid$bag.fraction[i],
+    cv.folds = 10)
+
+  hyper_grid$optimal_trees[i] <- which.min(gbm.tune$cv.error)
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.tune$cv.error))
+}
+
+best.model <- hyper_grid %>% 
+  arrange(min_RMSE) %>%
+  head(10)
+best.model
+```
+
+# Train Model
+
+```{r}
+gbm.final <- gbm(
+  formula = SalePrice ~ .,
+  data = data_train,
+  distribution = "gaussian",
+  n.trees = 1000,
+  interaction.depth = best.model$interaction.depth[1],
+  shrinkage = best.model$shrinkage[1],
+  n.minobsinnode = best.model$n.minobsinnode[1],
+  bag.fraction = best.model$bag.fraction[1],
+  cv.folds = 10)
+
+best <- which.min(gbm.final$cv.error)
+rmse.cv.boost = sqrt(gbm.final$cv.error[best])
+```
+
+## Predictions
+
+```{r}
+pred.gbm.final <- predict.gbm(gbm.final, n.trees=1000, data_test)
+rmse.test.boost <- sqrt(mean((data_test$SalePrice - pred.gbm.final)^2))
+```
+
+## Add to RMSE
+
+```{r}
+RMSE[10,] <- c(rmse.cv.boost, rmse.test.boost)
+RMSE
+```
+
+
+##Variable Importance Plot
+```{r}
+vip(gbm.final)
+```
+##Check the relationship between Neighborhood and SalesPrice by data visualization
+```{r}
+ggplot(data_train, aes(x = Neighborhood, y = SalePrice)) +
+  geom_boxplot()+
+  theme(axis.text.x = element_text(size=5))
+
+```
+
+
+***

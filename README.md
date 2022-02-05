@@ -4,6 +4,8 @@ Our project aims to predict house prices in Ames, Iowa, using machine learning m
 
 In finance industry, analysts usually use existing asset pricing models, such as capital asset pricing model (CAPM) and Fama-French 3-factor model to evaluate asset prices. However, many literatures, for example, Li and Yang (2011), have provided empirical evidence against such models’ ability in predicting different asset prices and suggested finance industry should be cautious when applying these models. Therefore, we hope to build an application with machine learning techniques to help better predict future house prices for home buyers and investors. 
 
+In this repository, You can find the code book, the knited R markdown file and this executive summary.
+
 ## Data
 We use data from Kaggle’s “House Prices- Advanced Regression Techniques” competition project. The original Ames Housing data set was compiled by Dean De Coock (2011). The training data and test data are readily available for use on Kaggle. To differentiate from the Kaggle project, we use the training data only. The dataset includes 1460 data points with 79 independent variables that could potentially predict house prices. The independent variables consider a wide range of housing features, from number of bedrooms and bathrooms to fence quality. A comprehensive variable description is attached in Appendix. 
 
